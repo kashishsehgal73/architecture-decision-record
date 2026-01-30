@@ -212,46 +212,40 @@ def apply_updates(rpt_data, update_values_df, columns_with_quotes):
                 rpt_data = rpt_data.drop(columns=[column_name])
                 print(f"Deleted column '{column_name}'")
     
-    # Update columns
+    # Update columns - optimized with merge/join
     update_actions = update_values_df[update_values_df['Action'] == 'update']
     if not update_actions.empty:
-        for idx, row in update_actions.iterrows():
-            column_name = row['ColumnName']
-            new_value = row['NewValue']
-            
+        # Group by ColumnName and LookupColumn
+        grouped = update_actions.groupby(['ColumnName', 'LookupColumn'])
+        
+        for (column_name, lookup_column), group in grouped:
             if column_name not in rpt_data.columns:
-                print(f"Column '{column_name}' not found, skipping")
+                print(f"Column '{column_name}' not found, skipping {len(group)} update(s)")
                 continue
             
-            has_lookup_col = pd.notna(row.get('LookupColumn'))
-            has_lookup_val = pd.notna(row.get('LookupValue'))
-            has_current_val = pd.notna(row.get('CurrentValue'))
+            # If lookup column is specified, use merge-based update
+            if pd.notna(lookup_column) and lookup_column in rpt_data.columns:
+                # Create mapping DataFrame
+                mapping_df = group[['LookupValue', 'NewValue']].drop_duplicates()
+                mapping_df = mapping_df.rename(columns={'LookupValue': lookup_column, 'NewValue': f'_new_{column_name}'})
+                
+                # Merge with main data
+                rpt_data = rpt_data.merge(mapping_df, on=lookup_column, how='left')
+                
+                # Update column where match found
+                mask = rpt_data[f'_new_{column_name}'].notna()
+                rpt_data.loc[mask, column_name] = rpt_data.loc[mask, f'_new_{column_name}']
+                
+                # Drop temporary column
+                rpt_data = rpt_data.drop(columns=[f'_new_{column_name}'])
+                
+                print(f"Updated '{column_name}' using '{lookup_column}' join ({len(mapping_df)} mappings, {mask.sum()} rows updated)")
             
-            lookup_column = row.get('LookupColumn') if has_lookup_col else None
-            lookup_value = row.get('LookupValue') if has_lookup_val else None
-            current_value = row.get('CurrentValue') if has_current_val else None
-            
-            # Apply update based on scenario
-            if has_lookup_col and has_lookup_val and has_current_val:
-                if lookup_column in rpt_data.columns:
-                    mask = smart_match(rpt_data[lookup_column], lookup_value) & smart_match(rpt_data[column_name], current_value)
-                    rpt_data.loc[mask, column_name] = new_value
-                    print(f"Updated '{column_name}' where '{lookup_column}'=='{lookup_value}' AND '{column_name}'=='{current_value}' ({mask.sum()} rows)")
-            
-            elif has_lookup_col and has_lookup_val:
-                if lookup_column in rpt_data.columns:
-                    mask = smart_match(rpt_data[lookup_column], lookup_value)
-                    rpt_data.loc[mask, column_name] = new_value
-                    print(f"Updated '{column_name}' where '{lookup_column}'=='{lookup_value}' ({mask.sum()} rows)")
-            
-            elif has_current_val:
-                mask = smart_match(rpt_data[column_name], current_value)
-                rpt_data.loc[mask, column_name] = new_value
-                print(f"Updated '{column_name}' from '{current_value}' to '{new_value}' ({mask.sum()} rows)")
-            
+            # No lookup column - direct updates
             else:
-                rpt_data[column_name] = new_value
-                print(f"Updated all rows in '{column_name}' to '{new_value}'")
+                for idx, row in group.iterrows():
+                    rpt_data[column_name] = row['NewValue']
+                    print(f"Updated all rows in '{column_name}' to '{row['NewValue']}'")
     
     return rpt_data
 
